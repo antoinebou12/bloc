@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "blender-minio-s3-integration"
+version = "3.0.0"
+description = "A Blender addon for integrating with MinIO and AWS S3 to upload, download, and manage Blender files."
+authors = ["Kashish aka MrKuros"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/MrKuros/bloc"
+repository = "https://github.com/MrKuros/bloc"
+keywords = ["blender", "minio", "aws", "s3", "addon"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+boto3 = "^1.28.0"
+minio = "^7.1.0"
+
+[build-system]
+requires = ["poetry>=1.1"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.blender]
+blender_version = "4.3.0"
+addon_name = "MinIO/S3 Integration"
+entry_point = "addon.py"
