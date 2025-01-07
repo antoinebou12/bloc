@@ -1,0 +1,9 @@
+schema_version = "1.0.0"
+id = "blender_minio_s3_integration"
+version = "1.0.0"
+name = "Blender MinIO/S3 Integration"
+tagline = "Upload, download, and manage Blender files in MinIO or AWS S3"
+maintainer = "Kashish aka MrKuros"
+type = "add-on"
+blender_version_min = "4.3.0"
+tags = ["Development", "Import-Export"]
