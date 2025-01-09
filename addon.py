@@ -7,6 +7,7 @@ bl_info = {
     "description": "Upload, download, and manage Blender files in MinIO or AWS S3",
     "category": "Development",
 }
+
 import bpy
 import os
 import sys
@@ -28,7 +29,9 @@ REQUIRED_PACKAGES = ["boto3", "minio"]
 
 cached_file_list = []
 cached_tree = {}
+error_messages = []
 expanded_folders = set()
+is_refreshing = False
 
 # Ensure Python modules are accessible
 def get_modules_path():
@@ -74,154 +77,95 @@ background_install_packages(REQUIRED_PACKAGES, modules_path)
 s3_client = None
 minio_client = None
 
-class CloudIntegrationPreferences(bpy.types.AddonPreferences):
-    bl_idname = __name__
-
+class CloudConnection(bpy.types.PropertyGroup):
+    name: bpy.props.StringProperty(name="Connection Name", default="New Connection")
     cloud_type: bpy.props.EnumProperty(
         name="Cloud Type",
-        description="Choose the cloud provider",
-        items=[("minio", "MinIO", ""), ("s3", "AWS S3", "")],
-        default="minio"
+        items=[("minio", "MinIO", ""), ("s3", "AWS S3", "")]
     )
-    endpoint_url: bpy.props.StringProperty(
-        name="Endpoint URL",
-        description="MinIO Endpoint URL (e.g., http://127.0.0.1:9000)",
-        default=""
-    )
-    access_key: bpy.props.StringProperty(
-        name="Access Key",
-        description="Access Key",
-        default="",
-        subtype='PASSWORD'
-    )
-    secret_key: bpy.props.StringProperty(
-        name="Secret Key",
-        description="Secret Key",
-        default="",
-        subtype='PASSWORD'
-    )
-    region_name: bpy.props.StringProperty(
-        name="Region Name",
-        description="AWS Region Name (S3 only)",
-        default="us-east-1"
-    )
-    bucket_name: bpy.props.StringProperty(
-        name="Bucket Name",
-        description="Bucket Name",
-        default=""
-    )
+    endpoint_url: bpy.props.StringProperty(name="Endpoint URL", default="")
+    access_key: bpy.props.StringProperty(name="Access Key", default="", subtype='PASSWORD')
+    secret_key: bpy.props.StringProperty(name="Secret Key", default="", subtype='PASSWORD')
+    region_name: bpy.props.StringProperty(name="Region Name", default="us-east-1")
+    bucket_name: bpy.props.StringProperty(name="Bucket Name", default="")
 
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "cloud_type")
-        if self.cloud_type == "minio":
-            layout.prop(self, "endpoint_url")
-        elif self.cloud_type == "s3":
-            layout.prop(self, "region_name")
-        layout.prop(self, "access_key")
-        layout.prop(self, "secret_key")
-        layout.prop(self, "bucket_name")
+class CLOUD_OT_ConnectionAdd(bpy.types.Operator):
+    bl_idname = "cloud.connection_add"
+    bl_label = "Add Cloud Connection"
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        new_conn = prefs.connections.add()
+        prefs.active_connection_index = len(prefs.connections) - 1
+        return {'FINISHED'}
+
+class CLOUD_OT_ConnectionRemove(bpy.types.Operator):
+    bl_idname = "cloud.connection_remove"
+    bl_label = "Remove Cloud Connection"
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        if prefs.connections:
+            prefs.connections.remove(prefs.active_connection_index)
+            prefs.active_connection_index = max(0, prefs.active_connection_index - 1)
+        return {'FINISHED'}
+
+def get_active_connection():
+    prefs = bpy.context.preferences.addons[__name__].preferences
+    if prefs.connections:
+        return prefs.connections[prefs.active_connection_index]
+    return None
 
 def initialize_cloud_client():
-    """Initialize the appropriate cloud client based on user preferences."""
     global s3_client, minio_client
-    prefs = bpy.context.preferences.addons[__name__].preferences
+    conn = get_active_connection()
+    if not conn:
+        logger.error("No active cloud connection.")
+        return
 
-    if prefs.cloud_type == "minio":
+    if conn.cloud_type == "minio":
         from minio import Minio
         minio_client = Minio(
-            prefs.endpoint_url.replace("http://", "").replace("https://", ""),
-            access_key=prefs.access_key,
-            secret_key=prefs.secret_key,
-            secure=prefs.endpoint_url.startswith("https://")
+            conn.endpoint_url.replace("http://", "").replace("https://", ""),
+            access_key=conn.access_key,
+            secret_key=conn.secret_key,
+            secure=conn.endpoint_url.startswith("https://")
         )
-    elif prefs.cloud_type == "s3":
+    elif conn.cloud_type == "s3":
         import boto3
         s3_client = boto3.client(
             "s3",
-            aws_access_key_id=prefs.access_key,
-            aws_secret_access_key=prefs.secret_key,
-            region_name=prefs.region_name
+            aws_access_key_id=conn.access_key,
+            aws_secret_access_key=conn.secret_key,
+            region_name=conn.region_name
         )
 
-def list_files_in_bucket():
-    """List files in the configured bucket."""
-    prefs = bpy.context.preferences.addons[__name__].preferences
-    initialize_cloud_client()
-    try:
-        if prefs.cloud_type == "minio":
-            objects = minio_client.list_objects(prefs.bucket_name, recursive=True)
-            return [obj.object_name for obj in objects]
-        elif prefs.cloud_type == "s3":
-            response = s3_client.list_objects_v2(Bucket=prefs.bucket_name)
-            return [content["Key"] for content in response.get("Contents", [])]
-    except Exception as e:
-        logger.error(f"Error listing files in bucket: {e}")
-        return []
+class CloudIntegrationPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
 
-def upload_file(local_file_path, s3_key):
-    prefs = bpy.context.preferences.addons[__name__].preferences
-    initialize_cloud_client()
-    try:
-        # Normalize object key to use forward slashes
-        normalized_key = s3_key.replace("\\", "/")
-        logger.info(f"Attempting to upload file: {local_file_path} as {normalized_key} to bucket: {prefs.bucket_name}")
-        
-        if prefs.cloud_type == "minio":
-            minio_client.fput_object(prefs.bucket_name, normalized_key, local_file_path)
-        elif prefs.cloud_type == "s3":
-            s3_client.upload_file(local_file_path, prefs.bucket_name, normalized_key)
-        
-        logger.info(f"Uploaded {local_file_path} as {normalized_key} to bucket {prefs.bucket_name}.")
-    except Exception as e:
-        logger.error(f"Error uploading file: {e}")
+    connections: bpy.props.CollectionProperty(type=CloudConnection)
+    active_connection_index: bpy.props.IntProperty(default=0)
 
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row()
+        row.template_list("UI_UL_list", "cloud_connections", self, "connections", self, "active_connection_index")
 
-def download_file(s3_key, local_dir):
-    prefs = bpy.context.preferences.addons[__name__].preferences
-    initialize_cloud_client()
-    try:
-        # Normalize object key to use forward slashes
-        normalized_key = s3_key.replace("\\", "/")
-        logger.info(f"Attempting to download file: {normalized_key} from bucket: {prefs.bucket_name}")
-        
-        local_file_path = os.path.join(local_dir, os.path.basename(normalized_key))
-        if prefs.cloud_type == "minio":
-            minio_client.fget_object(prefs.bucket_name, normalized_key, local_file_path)
-        elif prefs.cloud_type == "s3":
-            s3_client.download_file(prefs.bucket_name, normalized_key, local_file_path)
-        
-        logger.info(f"Downloaded {normalized_key} to {local_file_path}.")
-        return local_file_path
-    except Exception as e:
-        logger.error(f"Error downloading file: {e}")
-        return None
+        col = row.column(align=True)
+        col.operator("cloud.connection_add", icon="ADD", text="")
+        col.operator("cloud.connection_remove", icon="REMOVE", text="")
 
-
-        
-class CloudDeleteFileOperator(bpy.types.Operator):
-    bl_idname = "cloud.delete_file"
-    bl_label = "Delete File from Bucket"
-
-    file_name: bpy.props.StringProperty()
-
-    def execute(self, context):
-        prefs = bpy.context.preferences.addons[__name__].preferences
-        try:
-            if prefs.cloud_type == "minio":
-                minio_client.remove_object(prefs.bucket_name, self.file_name)
-            elif prefs.cloud_type == "s3":
-                s3_client.delete_object(Bucket=prefs.bucket_name, Key=self.file_name)
-            logger.info(f"Deleted file: {self.file_name}")
-        except Exception as e:
-            logger.error(f"Error deleting file: {e}")
-            self.report({"ERROR"}, f"Failed to delete file: {e}")
-            return {"CANCELLED"}
-
-        # Refresh the file list after deletion
-        bpy.ops.cloud.update_file_list()
-        return {"FINISHED"}
-
+        if self.connections:
+            conn = self.connections[self.active_connection_index]
+            layout.prop(conn, "name")
+            layout.prop(conn, "cloud_type")
+            if conn.cloud_type == "minio":
+                layout.prop(conn, "endpoint_url")
+            elif conn.cloud_type == "s3":
+                layout.prop(conn, "region_name")
+            layout.prop(conn, "access_key")
+            layout.prop(conn, "secret_key")
+            layout.prop(conn, "bucket_name")
 
 class CloudIntegrationPanel(bpy.types.Panel):
     bl_label = "Cloud Integration"
@@ -233,22 +177,27 @@ class CloudIntegrationPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
-        # Cloud Preferences
-        prefs = bpy.context.preferences.addons[__name__].preferences
+        row = layout.row(align=True)
+        row.operator("cloud.upload_file", text="Upload Current File")
+        row.operator("cloud.update_file_list", text="Refresh File List")
 
-        # Buttons for operations
-        layout.operator("cloud.upload_file", text="Upload Current File")
-        layout.operator("cloud.update_file_list", text="Refresh File List")
+        if is_refreshing:
+            layout.label(text="Refreshing...", icon="FILE_REFRESH")
+            return
+            
+        if error_messages:
+            box = layout.box()
+            box.label(text="Errors:", icon="ERROR")
+            for msg in error_messages[-5:]:
+                box.label(text=msg, icon="CANCEL")
+            error_messages.clear()
 
-        # Use the cached tree for displaying files
         if not cached_tree:
             layout.label(text="No files in the bucket.", icon="INFO")
         else:
             draw_file_tree(layout, cached_tree)
 
-
 def build_file_tree(file_list):
-    """Build a hierarchical tree from a flat list of file paths."""
     tree = {}
     for item in file_list:
         parts = item.name.split("/")
@@ -258,53 +207,33 @@ def build_file_tree(file_list):
                 current_level[part] = {}
             current_level = current_level[part]
     return tree
-    
-def draw_file_tree_with_bucket(layout, tree, bucket_name, path=""):
-    """Recursively draw the file tree in the Blender UI with bucket name."""
-    layout.label(text=f"Bucket: {bucket_name}", icon="FILE_VOLUME")
-    draw_file_tree(layout, tree, path)
-    
+
 def draw_file_tree(layout, tree, path=""):
-    """Recursively draw the file tree in the Blender UI with collapsible folders."""
     for key, value in tree.items():
         current_path = os.path.join(path, key) if path else key
-        if value:  # It's a folder
+        if value:
             row = layout.row(align=True)
-            # Determine icon based on expansion state
             icon = "TRIA_DOWN" if current_path in expanded_folders else "TRIA_RIGHT"
-            # Create a button that toggles folder state
             op = row.operator("cloud.toggle_folder", text="", icon=icon, emboss=False)
             op.folder_path = current_path
-            
-            # Folder label
             row.label(text=f"{key}/", icon="FILE_FOLDER")
-            
-            # If expanded, recurse into folder contents
             if current_path in expanded_folders:
-                # Indent children items for visual hierarchy
                 sub_box = layout.box()
                 draw_file_tree(sub_box, value, current_path)
-        else:  # It's a file
+        else:
             row = layout.row()
-            # Display file icon based on type
-            icon_type = "FILE_BLEND" if key.endswith(".blend") else "MESH_DATA"
+            lower_key = key.lower()
+            icon_type = ("MESH_DATA" if lower_key.endswith((".stl", ".obj", ".ply", ".usd", ".usda", ".usdc"))
+                         else ("ERROR" if lower_key.endswith(".gbx") else "FILE"))
             row.label(text=key, icon=icon_type)
-            
-            # Operations for the file
             ops_row = layout.row(align=True)
-            
-            # Add Download button
             download_op = ops_row.operator("cloud.download_file", text="Download")
-            download_op.file_name = current_path  # Use full path for nested files
-            
-            # Add Delete button
+            download_op.file_name = current_path
             delete_op = ops_row.operator("cloud.delete_file", text="Delete")
-            delete_op.file_name = current_path  # Use full path for nested files
-            
-            # Add Load button for STL files
-            if key.endswith(".stl"):
+            delete_op.file_name = current_path
+            if lower_key.endswith((".stl", ".obj", ".ply", ".usd", ".usda", ".usdc")):
                 load_op = ops_row.operator("cloud.load_file", text="Load to Scene")
-                load_op.file_name = current_path  # Use full path for STL files
+                load_op.file_name = current_path
 
 class CloudToggleFolderOperator(bpy.types.Operator):
     bl_idname = "cloud.toggle_folder"
@@ -323,18 +252,34 @@ class CloudToggleFolderOperator(bpy.types.Operator):
 class CloudFilePropertyGroup(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
 
+def schedule_update_scene_collection(files):
+    def update_scene_collection():
+        context = bpy.context
+        context.scene.cloud_file_list.clear()
+        for file in files:
+            new_item = context.scene.cloud_file_list.add()
+            new_item.name = file
+        global is_refreshing
+        is_refreshing = False
+        for area in bpy.context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return None
+    bpy.app.timers.register(update_scene_collection, first_interval=0.1)
+
 class CloudUpdateFileListOperator(bpy.types.Operator):
     bl_idname = "cloud.update_file_list"
     bl_label = "Update File List"
 
     def execute(self, context):
+        global is_refreshing
+        is_refreshing = True
+
         def background_update():
             global cached_file_list, cached_tree
-            # Fetch list of files from bucket
             files = list_files_in_bucket()
             cached_file_list = files
 
-            # Build the hierarchical tree once
             tree = {}
             for file in files:
                 parts = file.split("/")
@@ -345,13 +290,7 @@ class CloudUpdateFileListOperator(bpy.types.Operator):
                     current_level = current_level[part]
             cached_tree = tree
 
-            # Update the scene property collection on the main thread
-            def update_scene_collection():
-                context.scene.cloud_file_list.clear()
-                for file in files:
-                    new_item = context.scene.cloud_file_list.add()
-                    new_item.name = file
-            bpy.app.invoke_on_main_thread(update_scene_collection)
+            schedule_update_scene_collection(files)
 
         threading.Thread(target=background_update, daemon=True).start()
         return {"FINISHED"}
@@ -369,6 +308,53 @@ class CloudUploadFileOperator(bpy.types.Operator):
         bpy.ops.cloud.update_file_list()
         return {"FINISHED"}
 
+class CloudLoadFileOperator(bpy.types.Operator):
+    bl_idname = "cloud.load_file"
+    bl_label = "Load File to Scene"
+
+    file_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        temp_dir = tempfile.gettempdir()
+        initialize_cloud_client()
+
+        try:
+            local_file_path = download_file(self.file_name, temp_dir)
+            if not local_file_path or not os.path.exists(local_file_path):
+                self.report({"ERROR"}, f"File {self.file_name} does not exist or failed to download.")
+                return {"CANCELLED"}
+
+            filepath_lower = local_file_path.lower()
+            if filepath_lower.endswith(".stl"):
+                bpy.ops.wm.stl_import(filepath=local_file_path)
+                message = f"Loaded {self.file_name} (STL) into the Blender scene."
+            elif filepath_lower.endswith(".obj"):
+                bpy.ops.wm.obj_import(filepath=local_file_path)
+                message = f"Loaded {self.file_name} (OBJ) into the Blender scene."
+            elif filepath_lower.endswith(".usd") or filepath_lower.endswith(".usda") or filepath_lower.endswith(".usdc"):
+                bpy.ops.wm.usd_import(filepath=local_file_path)
+                message = f"Loaded {self.file_name} (USD) into the Blender scene."
+            elif filepath_lower.endswith(".ply"):
+                bpy.ops.wm.ply_import(filepath=local_file_path)
+                message = f"Loaded {self.file_name} (PLY) into the Blender scene."
+            elif filepath_lower.endswith(".gbx"):
+                self.report({"ERROR"}, "GBX file format is not supported.")
+                return {"CANCELLED"}
+            else:
+                self.report({"ERROR"}, f"{self.file_name} is not a supported file format.")
+                return {"CANCELLED"}
+
+            logger.info(message)
+            self.report({"INFO"}, message)
+
+        except Exception as e:
+            error_messages.append(str(e))
+            logger.error(f"Error loading file: {e}")
+            self.report({"ERROR"}, f"Failed to load file: {e}")
+            return {"CANCELLED"}
+
+        return {"FINISHED"}
+
 class CloudDownloadFileOperator(bpy.types.Operator):
     bl_idname = "cloud.download_file"
     bl_label = "Download File from Bucket"
@@ -376,63 +362,115 @@ class CloudDownloadFileOperator(bpy.types.Operator):
     file_name: bpy.props.StringProperty()
 
     def execute(self, context):
-        prefs = bpy.context.preferences.addons[__name__].preferences
-        temp_dir = tempfile.gettempdir()  # Temporary directory for downloads
+        temp_dir = tempfile.gettempdir()
         initialize_cloud_client()
 
         try:
-            # Download the file
             local_file_path = download_file(self.file_name, temp_dir)
             if local_file_path:
-                logger.info(f"Downloaded {self.file_name} to {local_file_path}")
                 self.report({"INFO"}, f"Downloaded {self.file_name}")
             else:
-                logger.error(f"Failed to download file: {self.file_name}")
                 self.report({"ERROR"}, f"Failed to download file: {self.file_name}")
                 return {"CANCELLED"}
-
         except Exception as e:
+            error_messages.append(str(e))
             logger.error(f"Error downloading file: {e}")
             self.report({"ERROR"}, f"Failed to download file: {e}")
             return {"CANCELLED"}
 
         return {"FINISHED"}
         
-class CloudLoadFileOperator(bpy.types.Operator):
-    bl_idname = "cloud.load_file"
-    bl_label = "Load STL File to Scene"
+class CloudDeleteFileOperator(bpy.types.Operator):
+    bl_idname = "cloud.delete_file"
+    bl_label = "Delete File from Bucket"
 
     file_name: bpy.props.StringProperty()
 
     def execute(self, context):
-        prefs = bpy.context.preferences.addons[__name__].preferences
-        temp_dir = tempfile.gettempdir()  # Temporary directory for downloads
-        initialize_cloud_client()
-
         try:
-            # Download the file
-            local_file_path = download_file(self.file_name, temp_dir)
-
-            if local_file_path and os.path.exists(local_file_path):
-                if local_file_path.endswith(".stl"):
-                    bpy.ops.wm.stl_import(filepath=local_file_path)
-                    logger.info(f"Loaded {self.file_name} into the Blender scene.")
-                    self.report({"INFO"}, f"Loaded {self.file_name} into the Blender scene.")
-                else:
-                    self.report({"ERROR"}, f"{self.file_name} is not a valid .stl file.")
-            else:
-                self.report({"ERROR"}, f"File {self.file_name} does not exist in the bucket.")
-                logger.error(f"File {self.file_name} does not exist or failed to download.")
+            conn = get_active_connection()
+            if not conn:
+                self.report({"ERROR"}, "No active cloud connection.")
                 return {"CANCELLED"}
 
+            if conn.cloud_type == "minio":
+                minio_client.remove_object(conn.bucket_name, self.file_name)
+            else:
+                s3_client.delete_object(Bucket=conn.bucket_name, Key=self.file_name)
+
+            bpy.ops.cloud.update_file_list()
+            self.report({"INFO"}, f"Deleted {self.file_name}")
         except Exception as e:
-            logger.error(f"Error loading file: {e}")
-            self.report({"ERROR"}, f"Failed to load file: {e}")
+            error_messages.append(str(e))
+            logger.error(f"Error deleting file: {e}")
+            self.report({"ERROR"}, f"Failed to delete file: {e}")
             return {"CANCELLED"}
 
         return {"FINISHED"}
+        
+def list_files_in_bucket():
+    conn = get_active_connection()
+    if not conn:
+        logger.error("No active cloud connection.")
+        return []
+
+    # Initialize the client if not already done
+    if conn.cloud_type == "minio" and not minio_client:
+        initialize_cloud_client()
+    elif conn.cloud_type == "s3" and not s3_client:
+        initialize_cloud_client()
+
+    try:
+        if conn.cloud_type == "minio":
+            objects = minio_client.list_objects(conn.bucket_name, recursive=True)
+            return [obj.object_name for obj in objects]
+        else:
+            response = s3_client.list_objects_v2(Bucket=conn.bucket_name)
+            return [obj['Key'] for obj in response.get('Contents', [])]
+    except Exception as e:
+        error_messages.append(str(e))
+        logger.error(f"Error listing files: {e}")
+        return []
+
+def upload_file(local_path, remote_name):
+    conn = get_active_connection()
+    if not conn:
+        logger.error("No active cloud connection.")
+        return False
+
+    try:
+        if conn.cloud_type == "minio":
+            minio_client.fput_object(conn.bucket_name, remote_name, local_path)
+        else:
+            s3_client.upload_file(local_path, conn.bucket_name, remote_name)
+        return True
+    except Exception as e:
+        error_messages.append(str(e))
+        logger.error(f"Error uploading file: {e}")
+        return False
+
+def download_file(remote_name, local_dir):
+    conn = get_active_connection()
+    if not conn:
+        logger.error("No active cloud connection.")
+        return None
+
+    try:
+        local_path = os.path.join(local_dir, os.path.basename(remote_name))
+        if conn.cloud_type == "minio":
+            minio_client.fget_object(conn.bucket_name, remote_name, local_path)
+        else:
+            s3_client.download_file(conn.bucket_name, remote_name, local_path)
+        return local_path
+    except Exception as e:
+        error_messages.append(str(e))
+        logger.error(f"Error downloading file: {e}")
+        return None
 
 def register():
+    bpy.utils.register_class(CloudConnection)
+    bpy.utils.register_class(CLOUD_OT_ConnectionAdd)
+    bpy.utils.register_class(CLOUD_OT_ConnectionRemove)
     bpy.utils.register_class(CloudIntegrationPreferences)
     bpy.utils.register_class(CloudIntegrationPanel)
     bpy.utils.register_class(CloudUpdateFileListOperator)
@@ -443,8 +481,25 @@ def register():
     bpy.utils.register_class(CloudToggleFolderOperator)
     bpy.utils.register_class(CloudFilePropertyGroup)
     bpy.types.Scene.cloud_file_list = bpy.props.CollectionProperty(type=CloudFilePropertyGroup)
+    # Initialize default preferences if not set
+    addon = bpy.context.preferences.addons.get(__name__)
+    if addon:
+        prefs = addon.preferences
+        if not prefs.connections:
+            # Create a default connection
+            conn = prefs.connections.add()
+            conn.name = "Default Connection"
+            conn.cloud_type = "s3"
+            conn.endpoint_url = ""
+            conn.access_key = ""
+            conn.secret_key = ""
+            conn.region_name = "us-east-1"
+            conn.bucket_name = ""
 
 def unregister():
+    bpy.utils.unregister_class(CloudConnection)
+    bpy.utils.unregister_class(CLOUD_OT_ConnectionAdd)
+    bpy.utils.unregister_class(CLOUD_OT_ConnectionRemove)
     bpy.utils.unregister_class(CloudIntegrationPreferences)
     bpy.utils.unregister_class(CloudIntegrationPanel)
     bpy.utils.unregister_class(CloudUpdateFileListOperator)
@@ -458,3 +513,4 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+
