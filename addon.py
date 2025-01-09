@@ -7,7 +7,6 @@ bl_info = {
     "description": "Upload, download, and manage Blender files in MinIO or AWS S3",
     "category": "Development",
 }
-
 import bpy
 import os
 import sys
@@ -26,6 +25,10 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 REQUIRED_PACKAGES = ["boto3", "minio"]
+
+cached_file_list = []
+cached_tree = {}
+expanded_folders = set()
 
 # Ensure Python modules are accessible
 def get_modules_path():
@@ -237,13 +240,12 @@ class CloudIntegrationPanel(bpy.types.Panel):
         layout.operator("cloud.upload_file", text="Upload Current File")
         layout.operator("cloud.update_file_list", text="Refresh File List")
 
-        # Display hierarchical file tree
-        files = build_file_tree(context.scene.cloud_file_list)
-
-        if not files:
+        # Use the cached tree for displaying files
+        if not cached_tree:
             layout.label(text="No files in the bucket.", icon="INFO")
         else:
-            draw_file_tree(layout, files)
+            draw_file_tree(layout, cached_tree)
+
 
 def build_file_tree(file_list):
     """Build a hierarchical tree from a flat list of file paths."""
@@ -304,8 +306,6 @@ def draw_file_tree(layout, tree, path=""):
                 load_op = ops_row.operator("cloud.load_file", text="Load to Scene")
                 load_op.file_name = current_path  # Use full path for STL files
 
-expanded_folders = set()
-
 class CloudToggleFolderOperator(bpy.types.Operator):
     bl_idname = "cloud.toggle_folder"
     bl_label = "Toggle Folder"
@@ -328,10 +328,32 @@ class CloudUpdateFileListOperator(bpy.types.Operator):
     bl_label = "Update File List"
 
     def execute(self, context):
-        context.scene.cloud_file_list.clear()
-        for file in list_files_in_bucket():
-            new_item = context.scene.cloud_file_list.add()
-            new_item.name = file
+        def background_update():
+            global cached_file_list, cached_tree
+            # Fetch list of files from bucket
+            files = list_files_in_bucket()
+            cached_file_list = files
+
+            # Build the hierarchical tree once
+            tree = {}
+            for file in files:
+                parts = file.split("/")
+                current_level = tree
+                for part in parts:
+                    if part not in current_level:
+                        current_level[part] = {}
+                    current_level = current_level[part]
+            cached_tree = tree
+
+            # Update the scene property collection on the main thread
+            def update_scene_collection():
+                context.scene.cloud_file_list.clear()
+                for file in files:
+                    new_item = context.scene.cloud_file_list.add()
+                    new_item.name = file
+            bpy.app.invoke_on_main_thread(update_scene_collection)
+
+        threading.Thread(target=background_update, daemon=True).start()
         return {"FINISHED"}
 
 class CloudUploadFileOperator(bpy.types.Operator):
