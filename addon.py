@@ -263,16 +263,32 @@ def draw_file_tree_with_bucket(layout, tree, bucket_name, path=""):
     draw_file_tree(layout, tree, path)
     
 def draw_file_tree(layout, tree, path=""):
-    """Recursively draw the file tree in the Blender UI."""
+    """Recursively draw the file tree in the Blender UI with collapsible folders."""
     for key, value in tree.items():
-        current_path = os.path.join(path, key)  # Full path for the current level
+        current_path = os.path.join(path, key) if path else key
         if value:  # It's a folder
-            row = layout.row()
+            row = layout.row(align=True)
+            # Determine icon based on expansion state
+            icon = "TRIA_DOWN" if current_path in expanded_folders else "TRIA_RIGHT"
+            # Create a button that toggles folder state
+            op = row.operator("cloud.toggle_folder", text="", icon=icon, emboss=False)
+            op.folder_path = current_path
+            
+            # Folder label
             row.label(text=f"{key}/", icon="FILE_FOLDER")
-            draw_file_tree(layout, value, current_path)  # Recurse into the folder
+            
+            # If expanded, recurse into folder contents
+            if current_path in expanded_folders:
+                # Indent children items for visual hierarchy
+                sub_box = layout.box()
+                draw_file_tree(sub_box, value, current_path)
         else:  # It's a file
             row = layout.row()
-            row.label(text=key, icon="FILE_BLEND" if key.endswith(".blend") else "MESH_DATA")
+            # Display file icon based on type
+            icon_type = "FILE_BLEND" if key.endswith(".blend") else "MESH_DATA"
+            row.label(text=key, icon=icon_type)
+            
+            # Operations for the file
             ops_row = layout.row(align=True)
             
             # Add Download button
@@ -287,6 +303,22 @@ def draw_file_tree(layout, tree, path=""):
             if key.endswith(".stl"):
                 load_op = ops_row.operator("cloud.load_file", text="Load to Scene")
                 load_op.file_name = current_path  # Use full path for STL files
+
+expanded_folders = set()
+
+class CloudToggleFolderOperator(bpy.types.Operator):
+    bl_idname = "cloud.toggle_folder"
+    bl_label = "Toggle Folder"
+
+    folder_path: bpy.props.StringProperty()
+
+    def execute(self, context):
+        global expanded_folders
+        if self.folder_path in expanded_folders:
+            expanded_folders.remove(self.folder_path)
+        else:
+            expanded_folders.add(self.folder_path)
+        return {'FINISHED'}
 
 class CloudFilePropertyGroup(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty()
@@ -386,6 +418,7 @@ def register():
     bpy.utils.register_class(CloudDeleteFileOperator)
     bpy.utils.register_class(CloudLoadFileOperator)
     bpy.utils.register_class(CloudDownloadFileOperator)
+    bpy.utils.register_class(CloudToggleFolderOperator)
     bpy.utils.register_class(CloudFilePropertyGroup)
     bpy.types.Scene.cloud_file_list = bpy.props.CollectionProperty(type=CloudFilePropertyGroup)
 
@@ -397,11 +430,9 @@ def unregister():
     bpy.utils.unregister_class(CloudDeleteFileOperator)
     bpy.utils.unregister_class(CloudLoadFileOperator)
     bpy.utils.unregister_class(CloudDownloadFileOperator)
+    bpy.utils.unregister_class(CloudToggleFolderOperator)
     bpy.utils.unregister_class(CloudFilePropertyGroup)
     del bpy.types.Scene.cloud_file_list
-
-
-
 
 if __name__ == "__main__":
     register()
