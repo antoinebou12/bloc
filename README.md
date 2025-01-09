@@ -16,6 +16,11 @@ Bloc is a Blender add-on that integrates AWS S3 for seamless file management. It
 - Upload Blender files with dependencies (textures, images, etc.) to S3.
 - Download Blender files with dependencies (textures, images, etc.) from S3.
 
+## Updated Features (v3.0)
+- Minio and S3 support multiple endpoints
+- Folder inside the Panel
+- Search 
+
 ## Note
 
 - Dependency paths should be relative to the blend file and located in the same folder as the blend file (sub-directories are fine as long as they are in the same parent directory as the blend file).
@@ -53,6 +58,10 @@ Before using the add-on, configure your AWS credentials:
    - Enter the name of your S3 bucket in the preferences.
 
    ![Add-on Preferences](https://github.com/user-attachments/assets/8ee196da-2d21-4e26-9cda-f88564d79be9)
+   ![Minio Add-on Preferences](https://github.com/user-attachments/assets/b5d6bf18-4fee-4d02-a993-1f6c13276301)
+   ![S3 Add-on Preferences](https://github.com/user-attachments/assets/96a4e7c5-575d-4860-91f1-2d58bf5bce27)
+
+
 
 ## Usage
 
@@ -62,6 +71,8 @@ Once installed and configured, use the add-on from the Blender interface:
    - Go to `View3D > Tool Shelf > S3 Integration` panel to access the features.
 
    ![S3 Integration Panel](https://github.com/user-attachments/assets/9f5a15af-1199-4ca0-b5f4-57eba054384a)
+   ![Minio Integration Panel](https://github.com/user-attachments/assets/0089253f-dbad-4c54-ba71-122dbaf7015d)
+
 
 ## Contributing
 
