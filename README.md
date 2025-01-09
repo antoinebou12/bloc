@@ -57,7 +57,6 @@ Before using the add-on, configure your AWS credentials:
 3. **Set Your S3 Bucket Name**
    - Enter the name of your S3 bucket in the preferences.
 
-   ![Add-on Preferences](https://github.com/user-attachments/assets/8ee196da-2d21-4e26-9cda-f88564d79be9)
    ![Minio Add-on Preferences](https://github.com/user-attachments/assets/b5d6bf18-4fee-4d02-a993-1f6c13276301)
    ![S3 Add-on Preferences](https://github.com/user-attachments/assets/96a4e7c5-575d-4860-91f1-2d58bf5bce27)
 
