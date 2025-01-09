@@ -25,7 +25,7 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-REQUIRED_PACKAGES = ["boto3", "minio"]
+REQUIRED_PACKAGES = ["boto3", "minio", "rapidfuzz"]
 
 cached_file_list = []
 cached_tree = {}
@@ -66,7 +66,6 @@ def background_install_packages(packages, modules_path):
                 except subprocess.CalledProcessError as e:
                     logger.error(f"Failed to install '{package}'. Error: {e}")
         bpy.context.window_manager.progress_end()
-
     threading.Thread(target=install_packages, daemon=True).start()
 
 modules_path = get_modules_path()
@@ -122,7 +121,7 @@ def initialize_cloud_client():
     if not conn:
         logger.error("No active cloud connection.")
         return
-
+    
     if conn.cloud_type == "minio":
         from minio import Minio
         minio_client = Minio(
@@ -176,6 +175,10 @@ class CloudIntegrationPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        scene = context.scene
+
+        # Add search field
+        layout.prop(scene, "cloud_search_query", text="Search")
 
         row = layout.row(align=True)
         row.operator("cloud.upload_file", text="Upload Current File")
@@ -184,7 +187,7 @@ class CloudIntegrationPanel(bpy.types.Panel):
         if is_refreshing:
             layout.label(text="Refreshing...", icon="FILE_REFRESH")
             return
-            
+
         if error_messages:
             box = layout.box()
             box.label(text="Errors:", icon="ERROR")
@@ -192,10 +195,37 @@ class CloudIntegrationPanel(bpy.types.Panel):
                 box.label(text=msg, icon="CANCEL")
             error_messages.clear()
 
-        if not cached_tree:
-            layout.label(text="No files in the bucket.", icon="INFO")
+        # Filter tree based on search query
+        query = scene.cloud_search_query.strip().lower()
+        if query:
+            # Show search results instead of full tree
+            if not cached_file_list:
+                layout.label(text="No files found.", icon="INFO")
+            else:
+                filtered_results = [f for f in cached_file_list if query in f.lower()]
+                if not filtered_results:
+                    layout.label(text="No matching files found.", icon="INFO")
+                else:
+                    for file in filtered_results:
+                        row = layout.row()
+                        lower_file = file.lower()
+                        icon_type = ("MESH_DATA" if lower_file.endswith((".stl", ".obj", ".ply", ".usd", ".usda", ".usdc"))
+                                     else "FILE")
+                        row.label(text=file, icon=icon_type)
+                        ops_row = layout.row(align=True)
+                        download_op = ops_row.operator("cloud.download_file", text="Download")
+                        download_op.file_name = file
+                        delete_op = ops_row.operator("cloud.delete_file", text="Delete")
+                        delete_op.file_name = file
+                        if lower_file.endswith((".stl", ".obj", ".ply", ".usd", ".usda", ".usdc")):
+                            load_op = ops_row.operator("cloud.load_file", text="Load to Scene")
+                            load_op.file_name = file
         else:
-            draw_file_tree(layout, cached_tree)
+            # No search query; show full tree structure
+            if not cached_tree:
+                layout.label(text="No files in the bucket.", icon="INFO")
+            else:
+                draw_file_tree(layout, cached_tree)
 
 def build_file_tree(file_list):
     tree = {}
@@ -407,7 +437,7 @@ class CloudDeleteFileOperator(bpy.types.Operator):
             return {"CANCELLED"}
 
         return {"FINISHED"}
-        
+
 def list_files_in_bucket():
     conn = get_active_connection()
     if not conn:
@@ -467,6 +497,86 @@ def download_file(remote_name, local_dir):
         logger.error(f"Error downloading file: {e}")
         return None
 
+class CloudSearchManager:
+    def __init__(self):
+        from rapidfuzz import fuzz
+        self.fuzz = fuzz
+        self.last_search = ""
+        self.last_results = []
+        self.file_type_filters = {
+            'mesh': ('.stl', '.obj', '.ply', '.fbx', '.3ds', '.dae'),
+            'scene': ('.blend', '.usd', '.usda', '.usdc', '.abc'),
+            'image': ('.png', '.jpg', '.jpeg', '.tiff', '.exr', '.hdr'),
+            'material': ('.mtl', '.sbsar'),
+        }
+        
+    def fuzzy_match(self, query, text):
+        """Implement fuzzy matching using RapidFuzz with custom scoring."""
+        query = query.lower()
+        text = text.lower()
+
+        # Direct substring match gets highest score
+        if query in text:
+            return 100
+
+        # Use RapidFuzz for fuzzy matching
+        ratio = self.fuzz.ratio(query, text)
+
+        # Check for matching file extension
+        _, query_ext = os.path.splitext(query)
+        _, text_ext = os.path.splitext(text)
+        if query_ext and query_ext == text_ext:
+            ratio += 20
+
+        # Boost score for matches at start of words
+        words = text.split('/')
+        for word in words:
+            if word.startswith(query):
+                ratio += 30
+                break
+
+        return min(ratio, 100)
+        
+    def filter_by_type(self, file_list, file_type=None):
+        """Filter files by type category"""
+        if not file_type or file_type == 'all':
+            return file_list
+            
+        extensions = self.file_type_filters.get(file_type.lower(), ())
+        return [f for f in file_list if f.lower().endswith(extensions)]
+        
+    def search(self, query, file_list, file_type=None, min_score=50):
+        """Perform enhanced search with scoring and filtering"""
+        if not query:
+            filtered_list = self.filter_by_type(file_list, file_type)
+            return [(f, 100) for f in filtered_list]  # All files get max score when no query
+            
+        results = []
+        for file_path in file_list:
+            # Split path for better matching
+            path_parts = file_path.split('/')
+            filename = path_parts[-1]
+            
+            # Calculate scores for different parts
+            filename_score = self.fuzzy_match(query, filename) * 1.2  # Boost filename matches
+            path_score = max([self.fuzzy_match(query, part) for part in path_parts[:-1]], default=0)
+            full_path_score = self.fuzzy_match(query, file_path)
+            
+            # Take best score
+            score = max(filename_score, path_score, full_path_score)
+            
+            if score >= min_score:
+                results.append((file_path, score))
+                
+        # Sort by score descending
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        # Apply type filtering
+        if file_type and file_type != 'all':
+            results = [(f, s) for f, s in results if f.lower().endswith(self.file_type_filters.get(file_type.lower(), ()))]
+            
+        return results
+
 def register():
     bpy.utils.register_class(CloudConnection)
     bpy.utils.register_class(CLOUD_OT_ConnectionAdd)
@@ -481,6 +591,11 @@ def register():
     bpy.utils.register_class(CloudToggleFolderOperator)
     bpy.utils.register_class(CloudFilePropertyGroup)
     bpy.types.Scene.cloud_file_list = bpy.props.CollectionProperty(type=CloudFilePropertyGroup)
+    bpy.types.Scene.cloud_search_query = bpy.props.StringProperty(
+        name="Search",
+        description="Search for files in the cloud bucket",
+        default=""
+    )
     # Initialize default preferences if not set
     addon = bpy.context.preferences.addons.get(__name__)
     if addon:
@@ -510,7 +625,7 @@ def unregister():
     bpy.utils.unregister_class(CloudToggleFolderOperator)
     bpy.utils.unregister_class(CloudFilePropertyGroup)
     del bpy.types.Scene.cloud_file_list
+    del bpy.types.Scene.cloud_search_query
 
 if __name__ == "__main__":
     register()
-
